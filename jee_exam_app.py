@@ -353,12 +353,12 @@ def main():
     with st.sidebar:
         st.header("📚 Select Paper")
         
-        # Default papers directory
-        papers_dir = "/workspace/papers-2025"
+        # Default papers directory - using relative path
+        papers_dir = "papers-2025"
         
         # Check if directory exists, if not use current directory
         if not os.path.exists(papers_dir):
-            papers_dir = "/workspace"
+            papers_dir = "."
         
         pdf_files = get_pdf_files(papers_dir)
         
@@ -631,7 +631,7 @@ def main():
         """, unsafe_allow_html=True)
         
         st.markdown("---")
-        st.info("💡 **Tip:** Papers are loaded from the `/workspace/papers-2025` directory. Make sure your PDF files are placed there.")
+        st.info("💡 **Tip:** Papers are loaded from the `papers-2025` directory. Make sure your PDF files are placed there.")
 
 
 if __name__ == "__main__":

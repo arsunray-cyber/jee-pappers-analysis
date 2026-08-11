@@ -99,8 +99,48 @@ class QuestionParser:
         self.pdf_path = pdf_path
         self.doc = pymupdf.open(pdf_path)
         
+    def detect_subject(self, text: str) -> str:
+        """Detect subject from question text"""
+        text_lower = text.lower()
+        
+        # Physics keywords
+        physics_keywords = ['physics', 'velocity', 'acceleration', 'force', 'energy', 
+                          'momentum', 'electric', 'magnetic', 'field', 'current', 
+                          'voltage', 'resistance', 'capacitor', 'inductor', 'wave',
+                          'optics', 'lens', 'mirror', 'thermodynamics', 'entropy',
+                          'photon', 'electron', 'proton', 'neutron', 'atom', 'nuclear']
+        
+        # Chemistry keywords
+        chemistry_keywords = ['chemistry', 'reaction', 'compound', 'molecule', 'ion',
+                            'acid', 'base', 'salt', 'oxidation', 'reduction', 'bond',
+                            'organic', 'inorganic', 'polymer', 'catalyst', 'equilibrium',
+                            'solution', 'concentration', 'mole', 'atomic', 'periodic',
+                            'hydrocarbon', 'alcohol', 'ketone', 'aldehyde']
+        
+        # Mathematics keywords
+        math_keywords = ['mathematics', 'maths', 'matrix', 'determinant', 'vector',
+                        'integral', 'derivative', 'differential', 'equation', 'function',
+                        'trigonometry', 'geometry', 'algebra', 'calculus', 'probability',
+                        'statistics', 'coordinate', 'circle', 'parabola', 'ellipse',
+                        'hyperbola', 'limit', 'continuity', 'series', 'sequence']
+        
+        physics_count = sum(1 for kw in physics_keywords if kw in text_lower)
+        chemistry_count = sum(1 for kw in chemistry_keywords if kw in text_lower)
+        math_count = sum(1 for kw in math_keywords if kw in text_lower)
+        
+        max_count = max(physics_count, chemistry_count, math_count)
+        
+        if max_count == 0:
+            return "General"
+        elif physics_count == max_count:
+            return "Physics"
+        elif chemistry_count == max_count:
+            return "Chemistry"
+        else:
+            return "Mathematics"
+    
     def extract_questions(self) -> List[Dict]:
-        """Extract questions from PDF using position-based parsing"""
+        """Extract questions from PDF using improved position-based parsing"""
         all_blocks = []
         for page_num, page in enumerate(self.doc):
             blocks = page.get_text('dict')['blocks']
@@ -121,7 +161,8 @@ class QuestionParser:
                             'page': page_num,
                             'y': y_pos,
                             'x': x_pos,
-                            'text': full_text
+                            'text': full_text,
+                            'lines': text_lines
                         })
         
         # Sort by page, then by y position (with tolerance), then by x
@@ -131,54 +172,88 @@ class QuestionParser:
         current_q_num = None
         current_q_text = ''
         current_opts = []
+        in_options_section = False
+        options_start_y = None
         
-        for block in all_blocks:
+        for i, block in enumerate(all_blocks):
             text = block['text'].strip()
+            lines = block.get('lines', [])
+            y_pos = block['y']
+            x_pos = block['x']
             
             # Check for question start: Q1., Q10., etc.
-            q_match = re.match(r'^Q(\d+)\.?\s*(.*)$', text, re.IGNORECASE)
+            q_match = re.match(r'^Q(\d+)\.\s*(.*)$', text, re.IGNORECASE)
             
             if q_match:
                 # Save previous question
                 if current_q_num is not None:
                     valid_opts = [o for o in current_opts if o and len(o.strip()) > 0]
                     if len(valid_opts) < 2:
-                        valid_opts = ['Numerical Answer']
+                        valid_opts = ['Option 1', 'Option 2', 'Option 3', 'Option 4']
+                    while len(valid_opts) < 4:
+                        valid_opts.append(f'Option {len(valid_opts)+1}')
                     questions.append({
                         'number': current_q_num,
                         'text': current_q_text.strip(),
-                        'options': valid_opts
+                        'options': valid_opts[:4],
+                        'subject': self.detect_subject(current_q_text)
                     })
                 
                 current_q_num = int(q_match.group(1))
-                current_q_text = q_match.group(2).strip()
+                remaining_text = q_match.group(2).strip()
+                current_q_text = remaining_text
                 current_opts = []
-            elif re.match(r'^\(([1-4])\)\s*(.*)$', text):
-                # Option line like '(1) value (2) value' or just '(1)'
-                opt_matches = re.findall(r'\(([1-4])\)\s*([^\(]+?)(?=\([1-4]\)|$)', text)
+                in_options_section = False
+                options_start_y = None
+                
+            elif any(re.match(r'^\(([1-4])\)$', line.strip()) for line in lines if line.strip()):
+                # This block contains only option numbers like (1), (2), etc. without actual option text
+                # Options are likely images - skip this block but mark we're in options section
+                in_options_section = True
+                if options_start_y is None:
+                    options_start_y = y_pos
+                # Don't try to extract text from these blocks since they're just labels
+                continue
+                
+            elif re.search(r'\([1-4]\)', text) and x_pos > 50:  # Option with some text
+                # Found option markers with text content
+                in_options_section = True
+                if options_start_y is None:
+                    options_start_y = y_pos
+                # Extract all options from this line
+                opt_matches = re.findall(r'\(([1-4])\)\s*([^\(]*?)(?=\([1-4]\)|$)', text)
                 for opt_num_str, opt_text in opt_matches:
                     opt_num = int(opt_num_str)
                     opt_text = opt_text.strip()
-                    while len(current_opts) < opt_num:
+                    while len(current_opts) < opt_num - 1:
                         current_opts.append('')
-                    if opt_text:
+                    if opt_num > len(current_opts):
+                        current_opts.append(opt_text)
+                    else:
                         current_opts[opt_num - 1] = opt_text
-            elif current_q_num and not current_opts:
+                        
+            elif current_q_num and not in_options_section:
                 # Continue question text
-                current_q_text += ' ' + text
-            elif current_q_num and current_opts and len(current_opts) > 0:
-                # Continue last option
-                current_opts[-1] += ' ' + text
+                if text and not re.match(r'^\d+\.$', text):
+                    current_q_text += ' ' + text
+                    
+            elif current_q_num and in_options_section and current_opts:
+                # Continue last option if it exists
+                if current_opts and text:
+                    current_opts[-1] += ' ' + text
         
         # Save last question
         if current_q_num is not None:
             valid_opts = [o for o in current_opts if o and len(o.strip()) > 0]
             if len(valid_opts) < 2:
-                valid_opts = ['Numerical Answer']
+                valid_opts = ['Option 1', 'Option 2', 'Option 3', 'Option 4']
+            while len(valid_opts) < 4:
+                valid_opts.append(f'Option {len(valid_opts)+1}')
             questions.append({
                 'number': current_q_num,
                 'text': current_q_text.strip(),
-                'options': valid_opts
+                'options': valid_opts[:4],
+                'subject': self.detect_subject(current_q_text)
             })
         
         return questions

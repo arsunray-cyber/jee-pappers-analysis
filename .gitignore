@@ -21,8 +21,8 @@ venv/
 .vscode/
 .idea/
 
-# Build artifacts
-dist/
+# Build and distribution
 build/
-target/
+dist/
+*.egg-info/
 ```

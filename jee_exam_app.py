@@ -12,7 +12,7 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
-# Custom CSS for exam-like interface
+# Custom CSS for exam-like interface with subject-specific colors
 st.markdown("""
 <style>
     .question-box {
@@ -88,8 +88,33 @@ st.markdown("""
         font-size: 48px;
         font-weight: bold;
     }
+    /* Subject-specific colors */
+    .subject-mathematics {
+        border-left-color: #FF6B6B !important;
+        background-color: #FFF5F5 !important;
+    }
+    .subject-physics {
+        border-left-color: #4ECDC4 !important;
+        background-color: #F0FFFE !important;
+    }
+    .subject-chemistry {
+        border-left-color: #45B7D1 !important;
+        background-color: #F0F9FF !important;
+    }
+    .subject-general {
+        border-left-color: #96CEB4 !important;
+        background-color: #F5FFF9 !important;
+    }
 </style>
 """, unsafe_allow_html=True)
+
+# Subject configuration with colors and emojis
+SUBJECT_CONFIG = {
+    "Mathematics": {"color": "#FF6B6B", "emoji": "📐", "bg": "#FFF5F5"},
+    "Physics": {"color": "#4ECDC4", "emoji": "⚡", "bg": "#F0FFFE"},
+    "Chemistry": {"color": "#45B7D1", "emoji": "🧪", "bg": "#F0F9FF"},
+    "General": {"color": "#96CEB4", "emoji": "📚", "bg": "#F5FFF9"}
+}
 
 
 class QuestionParser:
@@ -140,121 +165,101 @@ class QuestionParser:
             return "Mathematics"
     
     def extract_questions(self) -> List[Dict]:
-        """Extract questions from PDF using improved position-based parsing"""
-        all_blocks = []
-        for page_num, page in enumerate(self.doc):
-            blocks = page.get_text('dict')['blocks']
-            for block in blocks:
-                if block['type'] == 0:  # Text block
-                    text_lines = []
-                    for line in block.get('lines', []):
-                        line_text = ''.join(span['text'] for span in line.get('spans', []))
-                        if line_text.strip():
-                            text_lines.append(line_text.strip())
-                    
-                    if text_lines:
-                        full_text = ' '.join(text_lines)
-                        bbox = block.get('bbox', [])
-                        y_pos = bbox[1] if len(bbox) > 1 else 0
-                        x_pos = bbox[0] if len(bbox) > 0 else 0
-                        all_blocks.append({
-                            'page': page_num,
-                            'y': y_pos,
-                            'x': x_pos,
-                            'text': full_text,
-                            'lines': text_lines
-                        })
-        
-        # Sort by page, then by y position (with tolerance), then by x
-        all_blocks.sort(key=lambda b: (b['page'], int(b['y'] // 10) * 10, b['x']))
+        """Extract questions from PDF using improved parsing for JEE format"""
+        # Get full text from all pages
+        full_text = ""
+        for page in self.doc:
+            full_text += page.get_text() + "\n"
         
         questions = []
-        current_q_num = None
-        current_q_text = ''
-        current_opts = []
-        in_options_section = False
-        options_start_y = None
         
-        for i, block in enumerate(all_blocks):
-            text = block['text'].strip()
-            lines = block.get('lines', [])
-            y_pos = block['y']
-            x_pos = block['x']
+        # Pattern to match questions: Q followed by number and dot
+        # Split by question pattern
+        question_splits = re.split(r'(Q\d+\.)', full_text)
+        
+        # Process splits - they alternate between delimiter and content
+        i = 1
+        while i < len(question_splits) - 1:
+            q_marker = question_splits[i]  # e.g., "Q1."
+            content = question_splits[i + 1]
             
-            # Check for question start: Q1., Q10., etc.
-            q_match = re.match(r'^Q(\d+)\.\s*(.*)$', text, re.IGNORECASE)
-            
-            if q_match:
-                # Save previous question
-                if current_q_num is not None:
-                    valid_opts = [o for o in current_opts if o and len(o.strip()) > 0]
-                    if len(valid_opts) < 2:
-                        valid_opts = ['Option 1', 'Option 2', 'Option 3', 'Option 4']
-                    while len(valid_opts) < 4:
-                        valid_opts.append(f'Option {len(valid_opts)+1}')
-                    questions.append({
-                        'number': current_q_num,
-                        'text': current_q_text.strip(),
-                        'options': valid_opts[:4],
-                        'subject': self.detect_subject(current_q_text)
-                    })
-                
-                current_q_num = int(q_match.group(1))
-                remaining_text = q_match.group(2).strip()
-                current_q_text = remaining_text
-                current_opts = []
-                in_options_section = False
-                options_start_y = None
-                
-            elif any(re.match(r'^\(([1-4])\)$', line.strip()) for line in lines if line.strip()):
-                # This block contains only option numbers like (1), (2), etc. without actual option text
-                # Options are likely images - skip this block but mark we're in options section
-                in_options_section = True
-                if options_start_y is None:
-                    options_start_y = y_pos
-                # Don't try to extract text from these blocks since they're just labels
+            # Extract question number
+            q_num_match = re.match(r'Q(\d+)\.', q_marker)
+            if not q_num_match:
+                i += 2
                 continue
+            
+            q_num = int(q_num_match.group(1))
+            
+            # Split content into lines
+            lines = content.strip().split('\n')
+            
+            # Find where options start (look for (1), (2), (3), (4) pattern)
+            q_text_lines = []
+            opt_lines = []
+            in_options = False
+            
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
                 
-            elif re.search(r'\([1-4]\)', text) and x_pos > 50:  # Option with some text
-                # Found option markers with text content
-                in_options_section = True
-                if options_start_y is None:
-                    options_start_y = y_pos
-                # Extract all options from this line
-                opt_matches = re.findall(r'\(([1-4])\)\s*([^\(]*?)(?=\([1-4]\)|$)', text)
+                # Check if this line starts options section
+                if re.match(r'^\(1\)', line):
+                    in_options = True
+                    opt_lines.append(line)
+                elif in_options:
+                    opt_lines.append(line)
+                else:
+                    q_text_lines.append(line)
+            
+            # Join question text
+            q_text = ' '.join(q_text_lines).strip()
+            
+            # Extract options - handle both inline and separate line formats
+            options = []
+            opt_text_combined = ' '.join(opt_lines)
+            
+            # Try to extract options with text: (1) text (2) text ...
+            opt_matches = re.findall(r'\(([1-4])\)\s*([^\(]*?)(?=\([1-4]\)|$)', opt_text_combined)
+            
+            if opt_matches and len(opt_matches) >= 1:
+                # We found options with text
                 for opt_num_str, opt_text in opt_matches:
                     opt_num = int(opt_num_str)
                     opt_text = opt_text.strip()
-                    while len(current_opts) < opt_num - 1:
-                        current_opts.append('')
-                    if opt_num > len(current_opts):
-                        current_opts.append(opt_text)
+                    # Pad options array if needed
+                    while len(options) < opt_num - 1:
+                        options.append('')
+                    if opt_num > len(options):
+                        options.append(opt_text)
                     else:
-                        current_opts[opt_num - 1] = opt_text
-                        
-            elif current_q_num and not in_options_section:
-                # Continue question text
-                if text and not re.match(r'^\d+\.$', text):
-                    current_q_text += ' ' + text
-                    
-            elif current_q_num and in_options_section and current_opts:
-                # Continue last option if it exists
-                if current_opts and text:
-                    current_opts[-1] += ' ' + text
-        
-        # Save last question
-        if current_q_num is not None:
-            valid_opts = [o for o in current_opts if o and len(o.strip()) > 0]
-            if len(valid_opts) < 2:
-                valid_opts = ['Option 1', 'Option 2', 'Option 3', 'Option 4']
-            while len(valid_opts) < 4:
-                valid_opts.append(f'Option {len(valid_opts)+1}')
-            questions.append({
-                'number': current_q_num,
-                'text': current_q_text.strip(),
-                'options': valid_opts[:4],
-                'subject': self.detect_subject(current_q_text)
-            })
+                        options[opt_num - 1] = opt_text
+            else:
+                # Options might be just labels without extractable text (images/formulas)
+                # Check if we have (1), (2), (3), (4) markers
+                if re.search(r'\([1-4]\)', opt_text_combined):
+                    # Found option markers but no text - likely image-based options
+                    options = ['Option 1', 'Option 2', 'Option 3', 'Option 4']
+                else:
+                    # No options found at all
+                    options = ['Option 1', 'Option 2', 'Option 3', 'Option 4']
+            
+            # Ensure we have exactly 4 options
+            valid_opts = [o for o in options if o and len(o.strip()) > 0]
+            if len(valid_opts) < 4:
+                while len(valid_opts) < 4:
+                    valid_opts.append(f'Option {len(valid_opts)+1}')
+            
+            if q_text:  # Only add if we have question text
+                questions.append({
+                    'number': q_num,
+                    'text': q_text,
+                    'options': valid_opts[:4],
+                    'subject': self.detect_subject(q_text)
+                })
+            
+            i += 2
         
         return questions
     
@@ -409,19 +414,25 @@ def main():
             current_idx = st.session_state.current_question
             question = st.session_state.questions[current_idx]
             
-            # Subject badge
-            subject_colors = {
-                "Mathematics": "🔵",
-                "Physics": "🟣",
-                "Chemistry": "🟢",
-                "General": "⚪"
-            }
-            subject_emoji = subject_colors.get(question['subject'], "⚪")
-            st.caption(f"{subject_emoji} {question['subject']} - Question {question['number']}")
+            # Subject badge with color coding
+            subject_config = SUBJECT_CONFIG.get(question['subject'], SUBJECT_CONFIG["General"])
+            subject_emoji = subject_config["emoji"]
+            subject_color = subject_config["color"]
+            subject_class = f"subject-{question['subject'].lower()}"
             
-            # Question text
             st.markdown(f"""
-            <div class="question-box">
+            <div style="display: flex; align-items: center; margin-bottom: 10px;">
+                <span style="font-size: 20px; margin-right: 8px;">{subject_emoji}</span>
+                <span style="background-color: {subject_color}; color: white; padding: 4px 12px; border-radius: 15px; font-weight: bold; font-size: 14px;">
+                    {question['subject']}
+                </span>
+                <span style="margin-left: 10px; color: #666;">Question {question['number']}</span>
+            </div>
+            """, unsafe_allow_html=True)
+            
+            # Question text with subject-specific border color
+            st.markdown(f"""
+            <div class="question-box {subject_class}">
                 <div class="question-text">{question['text']}</div>
             </div>
             """, unsafe_allow_html=True)

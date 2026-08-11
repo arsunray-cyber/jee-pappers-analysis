@@ -12,7 +12,6 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
-
 # Custom CSS for exam-like interface
 st.markdown("""
 <style>
@@ -100,16 +99,9 @@ class QuestionParser:
         self.pdf_path = pdf_path
         self.doc = pymupdf.open(pdf_path)
         
-    def extract_text(self) -> str:
-        """Extract all text from PDF"""
-        full_text = ""
-        for page in self.doc:
-            full_text += page.get_text()
-        return full_text
-    
-    def extract_text_with_structure(self) -> List[Dict]:
-        """Extract text with block structure preserved"""
-        blocks_data = []
+    def extract_questions(self) -> List[Dict]:
+        """Extract questions from PDF using position-based parsing"""
+        all_blocks = []
         for page_num, page in enumerate(self.doc):
             blocks = page.get_text('dict')['blocks']
             for block in blocks:
@@ -122,197 +114,92 @@ class QuestionParser:
                     
                     if text_lines:
                         full_text = ' '.join(text_lines)
-                        blocks_data.append({
-                            'page': page_num + 1,
-                            'bbox': block.get('bbox', []),
+                        bbox = block.get('bbox', [])
+                        y_pos = bbox[1] if len(bbox) > 1 else 0
+                        x_pos = bbox[0] if len(bbox) > 0 else 0
+                        all_blocks.append({
+                            'page': page_num,
+                            'y': y_pos,
+                            'x': x_pos,
                             'text': full_text
                         })
-        return blocks_data
-    
-    def parse_questions(self) -> List[Dict]:
-        """Parse questions from extracted text using structured approach"""
-        blocks = self.extract_text_with_structure()
+        
+        # Sort by page, then by y position (with tolerance), then by x
+        all_blocks.sort(key=lambda b: (b['page'], int(b['y'] // 10) * 10, b['x']))
+        
         questions = []
+        current_q_num = None
+        current_q_text = ''
+        current_opts = []
         
-        current_question = None
-        current_options = []
-        question_counter = 0
-        
-        for block in blocks:
-            text = block['text']
+        for block in all_blocks:
+            text = block['text'].strip()
             
-            # Check if this is a question header
-            q_match = re.match(r'^Q(\d+)\.\s*(.+)$', text, re.IGNORECASE)
+            # Check for question start: Q1., Q10., etc.
+            q_match = re.match(r'^Q(\d+)\.?\s*(.*)$', text, re.IGNORECASE)
             
             if q_match:
-                # Save previous question if exists
-                if current_question is not None:
-                    questions.append(self._create_question_dict(
-                        question_counter, current_question, current_options
-                    ))
+                # Save previous question
+                if current_q_num is not None:
+                    valid_opts = [o for o in current_opts if o and len(o.strip()) > 0]
+                    if len(valid_opts) < 2:
+                        valid_opts = ['Numerical Answer']
+                    questions.append({
+                        'number': current_q_num,
+                        'text': current_q_text.strip(),
+                        'options': valid_opts
+                    })
                 
-                # Start new question
-                question_counter = int(q_match.group(1))
-                current_question = q_match.group(2).strip()
-                current_options = []
+                current_q_num = int(q_match.group(1))
+                current_q_text = q_match.group(2).strip()
+                current_opts = []
             elif re.match(r'^\(([1-4])\)\s*(.*)$', text):
-                # This is an option
-                opt_match = re.match(r'^\(([1-4])\)\s*(.*)$', text)
-                if opt_match:
-                    opt_num = int(opt_match.group(1))
-                    opt_text = opt_match.group(2).strip()
-                    # Ensure we have enough slots
-                    while len(current_options) < opt_num:
-                        current_options.append('')
-                    current_options[opt_num - 1] = opt_text
-            elif current_question and not current_options:
-                # Continuation of question text (before options start)
-                current_question += ' ' + text
-            elif current_question and current_options:
-                # Could be continuation of last option
-                if len(current_options) > 0:
-                    current_options[-1] += ' ' + text
+                # Option line like '(1) value (2) value' or just '(1)'
+                opt_matches = re.findall(r'\(([1-4])\)\s*([^\(]+?)(?=\([1-4]\)|$)', text)
+                for opt_num_str, opt_text in opt_matches:
+                    opt_num = int(opt_num_str)
+                    opt_text = opt_text.strip()
+                    while len(current_opts) < opt_num:
+                        current_opts.append('')
+                    if opt_text:
+                        current_opts[opt_num - 1] = opt_text
+            elif current_q_num and not current_opts:
+                # Continue question text
+                current_q_text += ' ' + text
+            elif current_q_num and current_opts and len(current_opts) > 0:
+                # Continue last option
+                current_opts[-1] += ' ' + text
         
-        # Don't forget the last question
-        if current_question is not None:
-            questions.append(self._create_question_dict(
-                question_counter, current_question, current_options
-            ))
+        # Save last question
+        if current_q_num is not None:
+            valid_opts = [o for o in current_opts if o and len(o.strip()) > 0]
+            if len(valid_opts) < 2:
+                valid_opts = ['Numerical Answer']
+            questions.append({
+                'number': current_q_num,
+                'text': current_q_text.strip(),
+                'options': valid_opts
+            })
         
         return questions
     
-    def _create_question_dict(self, number: int, text: str, options: List[str]) -> Dict:
-        """Create a question dictionary with proper formatting"""
-        # Clean up text
-        text = re.sub(r'\s+', ' ', text).strip()
-        
-        # Filter valid options
-        valid_options = [opt for opt in options if opt and len(opt) > 0]
-        
-        # Detect subject and type
-        subject = self._detect_subject(text)
-        question_type = 'MCQ' if len(valid_options) >= 2 else 'Numerical'
-        
-        # If no valid options, mark as numerical
-        if len(valid_options) < 2:
-            valid_options = ['Numerical Answer']
-        
-        return {
-            'number': number,
-            'text': text,
-            'options': valid_options,
-            'subject': subject,
-            'question_type': question_type
-        }
-    
-    def _extract_options(self, text: str) -> List[str]:
-        """Extract multiple choice options from text"""
-        options = []
-        
-        # Pattern 1: Standard (1), (2), (3), (4) format
-        simple_pattern = r'\(([1-4])\)\s*([^\(]+?)(?=\([1-4]\)|Q\d+|ANSWER|$)'
-        matches = re.findall(simple_pattern, text, re.DOTALL)
-        
-        if len(matches) >= 2:
-            # Create options array based on found option numbers
-            options_dict = {}
-            for opt_num, opt_text in matches:
-                options_dict[int(opt_num)] = opt_text.strip()
-            
-            # Build ordered list
-            for i in range(1, 5):
-                if i in options_dict:
-                    options.append(options_dict[i])
-        
-        # Pattern 2: Try extracting by looking for newlines before option markers
-        if len(options) < 2:
-            lines = text.split('\n')
-            current_option = None
-            current_text = []
-            
-            for line in lines:
-                opt_match = re.match(r'^\s*\(([1-4])\)\s*(.*)$', line.strip())
-                if opt_match:
-                    if current_option and current_text:
-                        options.append(' '.join(current_text).strip())
-                    current_option = int(opt_match.group(1))
-                    current_text = [opt_match.group(2).strip()] if opt_match.group(2).strip() else []
-                elif current_option is not None:
-                    current_text.append(line.strip())
-            
-            if current_option and current_text:
-                options.append(' '.join(current_text).strip())
-        
-        return [opt for opt in options if opt and len(opt) > 0]
-    
-    def _clean_question_text(self, text: str, options: List[str]) -> str:
-        """Remove options from question text"""
-        cleaned = text
-        
-        # Remove option patterns
-        for opt in options:
-            if opt:
-                cleaned = cleaned.replace(opt, '')
-        
-        # Remove (1), (2), (3), (4) markers
-        cleaned = re.sub(r'\([1-4]\)', '', cleaned)
-        
-        # Clean up extra whitespace
-        cleaned = re.sub(r'\s+', ' ', cleaned)
-        
-        return cleaned.strip()
-    
-    def _detect_subject(self, text: str) -> str:
-        """Detect subject based on question content"""
-        text_lower = text.lower()
-        
-        # Mathematics keywords
-        math_keywords = ['equation', 'triangle', 'circle', 'parabola', 'function', 
-                        'integral', 'derivative', 'matrix', 'probability', 'angle',
-                        'vector', 'line', 'plane', 'coordinate', 'tan', 'sin', 'cos']
-        
-        # Physics keywords
-        physics_keywords = ['velocity', 'acceleration', 'force', 'energy', 'magnetic',
-                          'electric', 'field', 'particle', 'motion', 'wave', 'light',
-                          'resistance', 'current', 'voltage', 'temperature', 'pressure']
-        
-        # Chemistry keywords
-        chem_keywords = ['reaction', 'compound', 'molecule', 'acid', 'base', 'ion',
-                        'bond', 'electron', 'atom', 'solution', 'oxidation', 'reduction',
-                        'organic', 'iupac', 'molar', 'gas', 'catalyst']
-        
-        math_count = sum(1 for kw in math_keywords if kw in text_lower)
-        physics_count = sum(1 for kw in physics_keywords if kw in text_lower)
-        chem_count = sum(1 for kw in chem_keywords if kw in text_lower)
-        
-        max_count = max(math_count, physics_count, chem_count)
-        
-        if max_count == 0:
-            return "General"
-        elif math_count == max_count:
-            return "Mathematics"
-        elif physics_count == max_count:
-            return "Physics"
-        else:
-            return "Chemistry"
-    
     def extract_answer_key(self) -> Dict[int, int]:
         """Extract answer key from PDF"""
-        text = self.extract_text()
+        text = ''
+        for page in self.doc:
+            text += page.get_text()
+        
         answer_key = {}
         
-        # Find answer key section
-        answer_section = re.search(r'ANSWER\s*KEY.*?(?=\n\n|$)', text, re.IGNORECASE | re.DOTALL)
-        if not answer_section:
-            # Try another pattern
-            answer_section = re.search(r'(\d+\.\s*\(\d+\))+', text)
+        # Look for patterns like "1. (1)" or "Q1. (1)" in answer key sections
+        # First try to find answer key section
+        answer_section = re.search(r'ANSWER\s*KEY.*?(?=SECTION|$)', text, re.IGNORECASE | re.DOTALL)
+        search_text = answer_section.group(0) if answer_section else text
         
-        if answer_section:
-            answer_text = answer_section.group(0)
-            # Extract question number and answer
-            matches = re.findall(r'(\d+)\.\s*\((\d+)\)', answer_text)
-            for q_num, ans in matches:
-                answer_key[int(q_num)] = int(ans)
+        # Extract question number and answer
+        matches = re.findall(r'(\d+)\.\s*\((\d+)\)', search_text)
+        for q_num, ans in matches:
+            answer_key[int(q_num)] = int(ans)
         
         return answer_key
 
@@ -378,7 +265,7 @@ def main():
                 # Parse the PDF
                 with st.spinner("Loading paper..."):
                     parser = QuestionParser(selected_path)
-                    questions = parser.parse_questions()
+                    questions = parser.extract_questions()
                     answer_key = parser.extract_answer_key()
                     
                     if questions:
